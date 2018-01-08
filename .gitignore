@@ -1,0 +1,13 @@
+*.pyc
+__pycache__
+/data/
+/logs/
+/caffe
+/models/
+/checkpoints/
+/parsed_data/
+/predicts/
+/samples/
+/user_survey/
+MNIST_data/
+/Monomer

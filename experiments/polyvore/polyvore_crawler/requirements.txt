@@ -1,0 +1,4 @@
+tqdm==4.11.2
+boto==2.46.1
+smart_open==1.5.3
+Pillow==4.1.0

@@ -1,0 +1,407 @@
+diff --git a/Makefile b/Makefile
+index 5a07ae2..125613b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,11 +1,11 @@
+ CC = g++
+-CFLAGS = -Wall -O3 -fopenmp -Igzstream -Isrc -IHLBFGS -Icpp/src -std=c++0x 
+-LDFLAGS = -lgomp -lgzstream -lz -lstdc++ -Lgzstream
++CFLAGS = -Wall -O3 -fopenmp -Igzstream -Iargs -Isrc -IHLBFGS -Icpp/src -std=c++0x
++LDFLAGS = -lgomp -lgzstream -lz -lstdc++ -Lgzstream -lboost_system -lboost_filesystem
+ OBJECTS = obj/common.o obj/corpus.o obj/features.o obj/HLBFGS.o obj/HLBFGS_BLAS.o obj/LineSearch.o obj/ICFS.o gzstream/gzstream.o
+ MODELOBJECTS = obj/imageCorpus.o obj/mahalanobis.o obj/SIGIR.o obj/Monomer.o
+ 
+ 
+-all: train
++all: split
+ 
+ gzstream/gzstream.o:
+ 	cd gzstream && make
+@@ -45,9 +45,9 @@ obj/features.o: src/features.cpp src/imageCorpus.hpp obj/corpus.o obj/common.o M
+ 
+ 
+ 
+-train: src/main.cpp $(OBJECTS) $(MODELOBJECTS) Makefile
+-	$(CC) $(CFLAGS) -o train src/main.cpp $(OBJECTS) $(MODELOBJECTS) $(LDFLAGS)
++split: src/split.cpp $(OBJECTS) $(MODELOBJECTS) Makefile
++	$(CC) $(CFLAGS) -o split src/split.cpp $(OBJECTS) $(MODELOBJECTS) $(LDFLAGS)
+ 
+ 
+ clean:
+-	rm -rf $(OBJECTS) $(MODELOBJECTS) train
++	rm -rf $(OBJECTS) $(MODELOBJECTS) split
+diff --git a/src/corpus.cpp b/src/corpus.cpp
+index f45a061..9871f62 100644
+--- a/src/corpus.cpp
++++ b/src/corpus.cpp
+@@ -48,7 +48,7 @@ corpus::corpus(	const char* featurePath, int dim, const char* categoryPath, vect
+ 
+ 	double ma;
+ 	if (featureDim == 4096) { // image feature only
+-		ma = 58.388599;
++		ma = 1.0;
+ 	} else {
+ 		ma = 1.0;  // NOTE: must pre-normalize the image feature in mixed-feature case
+ 	}
+@@ -330,4 +330,4 @@ void corpus::loadCategories(const char* categoryPath, vector<string>& CTPath, in
+ corpus::~corpus()
+ {
+ 	delete [] itemCategoryId;
+-}
+\ No newline at end of file
++}
+diff --git a/src/imageCorpus.cpp b/src/imageCorpus.cpp
+index 08459c6..6416cf7 100644
+--- a/src/imageCorpus.cpp
++++ b/src/imageCorpus.cpp
+@@ -1,3 +1,5 @@
++#include <boost/filesystem.hpp>
++
+ #include "imageCorpus.hpp"
+ 
+ #include "HLBFGS.h"
+@@ -357,4 +359,85 @@ string imageCorpus::toString()
+ 	char str[10000];
+ 	sprintf(str, "WNN__lambda_%f", lambda);
+ 	return str;
+-}
+\ No newline at end of file
++}
++
++void imageCorpus::saveGraph(const string &output_path) {
++	boost::filesystem::path root_dir = output_path;
++	boost::filesystem::create_directories(root_dir / "train");
++	boost::filesystem::create_directories(root_dir / "val");
++	boost::filesystem::create_directories(root_dir / "test");
++
++	struct setting {
++		boost::filesystem::path root_dir;
++		const char *feature_name;
++		int start;
++		int end;
++	};
++	vector<setting> settings = {
++			{(root_dir / "train"), "features.b.raw", 0, validStart},
++			{(root_dir / "val"), "features.b", validStart, testStart},
++			{(root_dir / "test"), "features.b", testStart, (int)edges.size()},
++	};
++
++	// output items
++	printf("output items...\n");
++	ofstream output_items;
++	output_items.open((root_dir / "items.txt").string().c_str());
++	for (const auto &item : corp->itemIds) {
++		if (corp->itemCategoryId[item.second] != -1) {
++			output_items << item.first << endl;
++		}
++	}
++
++	for (const setting &s : settings) {
++		printf("output %s...\n", s.root_dir.string().c_str());
++
++		// output pairs
++		ofstream output_pos;
++		output_pos.open((s.root_dir / "pairs_pos.txt").string().c_str());
++		ofstream output_neg;
++		output_neg.open((s.root_dir / "pairs_neg.txt").string().c_str());
++		ofstream output_all;
++		output_all.open((s.root_dir / "pairs_all.txt").string().c_str());
++
++		set<int> present_ids;
++		for (int i = s.start; i < s.end; ++i) {
++			present_ids.insert(edges[i]->productFrom);
++			present_ids.insert(edges[i]->productTo);
++			if (edges[i]->label == 1) {
++				output_pos << corp->rItemIds[edges[i]->productFrom] << " "
++									<< corp->graphName << " "
++									<< corp->rItemIds[edges[i]->productTo] << endl;
++			} else {
++				output_neg << corp->rItemIds[edges[i]->productFrom] << " "
++									<< corp->graphName << " "
++									<< corp->rItemIds[edges[i]->productTo] << endl;
++			}
++			output_all << corp->rItemIds[edges[i]->productFrom] << " "
++								<< corp->graphName << " "
++								<< corp->rItemIds[edges[i]->productTo] << " "
++								<< edges[i]->label << endl;
++		}
++		output_pos.close();
++		output_neg.close();
++		output_all.close();
++
++		// output features
++		const char *feature_path = (s.root_dir / s.feature_name).string().c_str();
++		FILE *fFile = fopen_(feature_path, "wb");
++		for (int idx : present_ids) {
++			float *feat = new float[corp->featureDim];
++			for (int i = 0; i < corp->featureDim; i++) {
++				feat[i] = 0.0;
++			}
++			for (const auto &p : corp->features[idx]) {
++				feat[p.first] = p.second;
++			}
++			fwrite(corp->rItemIds[idx].c_str(), sizeof(char), 10, fFile);
++			fwrite(feat, sizeof(float), corp->featureDim, fFile);
++
++			delete[] feat;
++		}
++		fclose(fFile);
++	}
++}
+diff --git a/src/imageCorpus.hpp b/src/imageCorpus.hpp
+index 12ccede..c9636d9 100644
+--- a/src/imageCorpus.hpp
++++ b/src/imageCorpus.hpp
+@@ -35,6 +35,8 @@ public:
+ 		}
+ 	}
+ 
++	void saveGraph(const string &output_path);
++
+ 	~imageCorpus() {}
+ 
+ 	virtual void init();
+diff --git a/src/main.cpp b/src/main.cpp
+deleted file mode 100644
+index 6c2255b..0000000
+--- a/src/main.cpp
++++ /dev/null
+@@ -1,126 +0,0 @@
+-#include "corpus.hpp"
+-#include "imageCorpus.hpp"
+-#include "mahalanobis.hpp"
+-#include "SIGIR.hpp"
+-#include "Monomer.hpp"
+-
+-
+-void experiment_WNN( corpus* corp, double lambda, int iterations, char* model_path)
+-{
+-	imageCorpus md(corp, lambda);
+-	md.init();
+-	md.train(iterations);
+-
+-	double train, valid, test;
+-	train = md.error(TRAIN);
+-	valid = md.error(VALID);
+-	test = md.error(TEST);
+-
+-	printf("  \"WNN error\": {\"train\": %f, \"valid\": %f, \"test\": %f}\n", train, valid, test);
+-
+-	md.saveModel((string(model_path) + "--" + corp->graphName + "--" + md.toString() + ".txt").c_str());
+-	md.clean_up();
+-}
+-
+-void experiment_SIGIR(	corpus* corp, int K, double lambda, int iterations, char* model_path)
+-{
+-	SIGIR md(corp, K, lambda);
+-	md.init();
+-	md.train(iterations);
+-
+-	double train, valid, test;
+-	train = md.error(TRAIN);
+-	valid = md.error(VALID);
+-	test = md.error(TEST);
+-
+-	printf("  \"SIGIR error\": {\"train\": %f, \"valid\": %f, \"test\": %f}\n", train, valid, test);
+-
+-	md.saveModel((string(model_path) + "--" + corp->graphName + "--" + md.toString() + ".txt").c_str());
+-	md.clean_up();
+-}
+-
+-void experiment_Monomer( corpus* corp, int K, int N, double lambda, int iterations, char* model_path)
+-{
+-	Monomer md(corp, K, N, lambda);
+-	md.init();
+-	md.train(iterations);
+-
+-	double train, valid, test;
+-	train = md.error(TRAIN);
+-	valid = md.error(VALID);
+-	test = md.error(TEST);
+-
+-	printf("  \"Monomer error\": {\"train\": %f, \"valid\": %f, \"test\": %f}\n", train, valid, test);
+-
+-	md.saveModel((string(model_path) + "--" + corp->graphName + "--" + md.toString() + ".txt").c_str());
+-	md.clean_up();
+-}
+-
+-
+-int main(int argc, char** argv)
+-{
+-	srand(0);
+-
+-	if (argc != 13) {
+-		printf("Files required are:\n");
+-		printf("  1: feature path\n");
+-		printf("  2: feature dim\n");
+-
+-		printf("  3: metadata file\n");
+-		printf("  4: category prefix\n");
+-		printf("  5: layer\n");
+-
+-		printf("  6: graph path\n");
+-		printf("  7: list of potential duplicate products to be merged\n");
+-
+-		printf("  8: transform dimensionality (K)\n");
+-		printf("  9: #Components\n");
+-		printf(" 10: lambda (0 in SIGIR)\n");    
+-
+-		printf(" 11: Iter\n");
+-		printf(" 12: model path\n");
+-		exit(0);
+-	}
+-
+-	char* featurePath = argv[1];
+-	int dim = atoi(argv[2]);
+-
+-	char* metaPath = argv[3];
+-	string ctpath(argv[4]);
+-	int layer = atoi(argv[5]);
+-
+-	char* graphPath = argv[6];
+-	char* duplicatePath = argv[7];
+-
+-	int K = atoi(argv[8]);
+-	int nComponents = atoi(argv[9]);
+-	double lambda = atof(argv[10]);  
+-
+-	int iter = atoi(argv[11]);
+-	char* modelpath = argv[12];
+-
+-	printf("{\n");
+-	printf("  \"corpus\": \"%s\",\n", argv[1]);
+-
+-	vector<string> CTPath;
+-	int start = 0;
+-	while (true) {
+-		size_t found = ctpath.find('|', start);
+-		if (found == string::npos) {
+-			CTPath.push_back(ctpath.substr(start));
+-			break;
+-		} else {
+-			CTPath.push_back(ctpath.substr(start, found - start));
+-			start = found + 1;
+-		}
+-	}
+-
+-	corpus corp(featurePath, dim, metaPath, CTPath, layer, graphPath, duplicatePath);
+-
+-	// experiment_WNN(&corp, lambda, iter, modelpath);
+-	// experiment_SIGIR(&corp, K, lambda, iter, modelpath);
+-	experiment_Monomer(&corp, K, nComponents, lambda, iter, modelpath);
+-
+-	printf("}\n");
+-	return 0;
+-}
+diff --git a/src/split.cpp b/src/split.cpp
+new file mode 100644
+index 0000000..374bb23
+--- /dev/null
++++ b/src/split.cpp
+@@ -0,0 +1,106 @@
++#include <iostream>
++#include <args.hxx>
++
++#include "corpus.hpp"
++#include "imageCorpus.hpp"
++#include "mahalanobis.hpp"
++#include "SIGIR.hpp"
++#include "Monomer.hpp"
++
++void split_dataset(corpus *corp, const string &output_path) {
++	imageCorpus ig(corp, 0.0);
++	ig.saveGraph(output_path);
++}
++
++struct ParsedArgs {
++	std::string featurePath;
++	int featureDim;
++	std::string metaPath;
++	std::string categoryPrefix;
++	int layer;
++	std::string graphPath;
++	std::string dupPath;
++	std::string outputPath;
++};
++
++ParsedArgs parse_args(int argc, char **argv) {
++	args::ArgumentParser parser("Monomer");
++	args::HelpFlag help(parser, "help", "Display this help menu", {'h', "help"});
++	args::ValueFlag<std::string> featurePath(parser, "feature-path",
++																					"The feature path", {'f'});
++	args::ValueFlag<int> featureDim(parser, "dim", "The feature dim", {'d'});
++	args::ValueFlag<std::string> metaPath(parser, "meta-path", "The meta path",
++																				{'m'});
++	args::ValueFlag<std::string> categoryPrefix(
++			parser, "category-prefix", "The category prefix separated by |", {"cp"});
++	args::ValueFlag<int> layer(parser, "layer", "The layer after prefix",
++														{"layer"});
++
++	args::ValueFlag<std::string> graphPath(parser, "graph-path", "The graph path",
++																				{"graph_path"});
++
++	args::ValueFlag<std::string> dupPath(parser, "dup-path", "The duplicate path",
++																			{"dup_path"});
++
++	args::ValueFlag<std::string> outputPath(parser, "output-path",
++																					"The output path", {"output_path"});
++
++	try {
++		parser.ParseCLI(argc, argv);
++		if (!(featurePath && featureDim && metaPath && categoryPrefix && layer &&
++					graphPath && outputPath)) {
++			std::cout << parser;
++			exit(1);
++		}
++	} catch (args::Help) {
++		std::cout << parser;
++		exit(0);
++	} catch (args::ParseError e) {
++		std::cerr << e.what() << std::endl;
++		std::cerr << parser;
++		exit(1);
++	} catch (args::ValidationError e) {
++		std::cerr << e.what() << std::endl;
++		std::cerr << parser;
++		exit(1);
++	}
++
++	std::string dup_path = dupPath ? args::get(dupPath) : "";
++
++	return ParsedArgs{args::get(featurePath),
++										args::get(featureDim),
++										args::get(metaPath),
++										args::get(categoryPrefix),
++										args::get(layer),
++										args::get(graphPath),
++										dup_path,
++										args::get(outputPath)};
++}
++
++int main(int argc, char **argv) {
++	srand(0);
++	auto args = parse_args(argc, argv);
++
++	printf("{\n");
++	printf("	\"corpus\": \"%s\",\n", args.featurePath.c_str());
++
++	vector<string> CTPath;
++	int start = 0;
++	while (true) {
++		size_t found = args.categoryPrefix.find('|', start);
++		if (found == string::npos) {
++			CTPath.push_back(args.categoryPrefix.substr(start));
++			break;
++		} else {
++			CTPath.push_back(args.categoryPrefix.substr(start, found - start));
++			start = found + 1;
++		}
++	}
++
++	corpus corp(args.featurePath.c_str(), args.featureDim, args.metaPath.c_str(),
++							CTPath, args.layer, args.graphPath.c_str(), args.dupPath.c_str());
++
++	split_dataset(&corp, args.outputPath);
++	printf("}\n");
++	return 0;
++}

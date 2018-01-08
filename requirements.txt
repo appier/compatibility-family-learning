@@ -1,0 +1,7 @@
+six
+tensorflow-gpu
+scipy
+numpy
+tqdm
+smart-open
+annoy
